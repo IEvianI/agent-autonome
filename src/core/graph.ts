@@ -106,28 +106,38 @@ export function createAgentGraph(
     return { messages: [{ role: "assistant" as const, content: response.content }] };
   }
 
-  function reviewCriticalActions(state: State) {
-    const requests: ApprovalRequest[] = pendingToolUses(state).flatMap((call) => {
+  async function describeAction(tool: AgentTool, input: unknown, ctx: ToolContext) {
+    try {
+      return await tool.summarize(input, ctx);
+    } catch (error) {
+      // Si le résumé échoue (API indisponible…), l'admin voit quand même les arguments bruts.
+      const reason = error instanceof Error ? error.message : String(error);
+      return `${tool.name} ${JSON.stringify(input)} (résumé indisponible : ${reason})`;
+    }
+  }
+
+  async function reviewCriticalActions(state: State) {
+    const requests: ApprovalRequest[] = [];
+    for (const call of pendingToolUses(state)) {
       const tool = toolsByName.get(call.name);
       const parsed = tool?.schema.safeParse(call.input);
       // Un appel invalide n'est pas soumis à l'admin : le nœud suivant renverra l'erreur au modèle.
-      if (!tool?.requiresApproval || !parsed?.success) return [];
-      return [
-        {
-          toolUseId: call.id,
-          toolName: call.name,
-          input: parsed.data,
-          summary: tool.summarize(parsed.data, state.context),
-        },
-      ];
-    });
+      if (!tool?.requiresApproval || !parsed?.success) continue;
+      requests.push({
+        toolUseId: call.id,
+        toolName: call.name,
+        input: parsed.data,
+        summary: await describeAction(tool, parsed.data, state.context),
+      });
+    }
 
     if (requests.length === 0) return { decisions: {} };
 
     // Le graphe s'arrête ici et le checkpointer sauvegarde l'état.
     // À la reprise (new Command({ resume })), LangGraph ré-exécute ce nœud depuis le début
-    // et interrupt() renvoie cette fois la réponse de l'admin. D'où la règle :
-    // aucun effet de bord dans ce nœud, les outils s'exécutent dans le nœud suivant.
+    // et interrupt() renvoie cette fois la réponse de l'admin. D'où la règle : aucun effet
+    // de bord ici (les lectures faites pour les résumés sont simplement refaites),
+    // les outils s'exécutent dans le nœud suivant.
     const decisions = interrupt<ApprovalRequest[], Record<string, ApprovalDecision>>(requests);
     return { decisions };
   }

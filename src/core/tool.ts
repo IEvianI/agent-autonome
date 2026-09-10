@@ -14,8 +14,8 @@ export interface AgentTool {
   schema: z.ZodObject;
   /** Outil critique : le graphe se met en pause et attend une validation humaine avant de l'exécuter. */
   requiresApproval: boolean;
-  /** Phrase lue par l'administrateur qui valide l'action. */
-  summarize(input: unknown, ctx: ToolContext): string;
+  /** Phrase lue par l'administrateur qui valide l'action (peut lire l'état actuel pour montrer l'avant/après). */
+  summarize(input: unknown, ctx: ToolContext): string | Promise<string>;
   execute(input: unknown, ctx: ToolContext): Promise<unknown>;
 }
 
@@ -24,7 +24,7 @@ type ToolConfig<Schema extends z.ZodObject> = {
   description: string;
   schema: Schema;
   requiresApproval?: boolean;
-  summarize?: (input: z.infer<Schema>, ctx: ToolContext) => string;
+  summarize?: (input: z.infer<Schema>, ctx: ToolContext) => string | Promise<string>;
   execute: (input: z.infer<Schema>, ctx: ToolContext) => Promise<unknown>;
 };
 

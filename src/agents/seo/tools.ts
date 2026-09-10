@@ -1,78 +1,159 @@
-import * as cheerio from "cheerio";
 import { z } from "zod";
-import { defineTool, type ToolContext } from "../../core/tool";
-import { publishedChanges } from "./fake-cms";
+import { defineTool, type AgentTool } from "../../core/tool";
+import type { ShopifyClient } from "./shopify";
 
-const pathSchema = z.string().startsWith("/").describe("Chemin de la page sur le site, ex : / ou /produits/tasse");
+type Seo = { title: string | null; description: string | null };
+type UserError = { field: string[] | null; message: string };
 
-// Le site vient du contexte serveur, pas du modèle : une consigne cachée dans le HTML
-// d'une page analysée ne peut pas envoyer l'agent vers un autre domaine.
-function pageUrl(path: string, ctx: ToolContext): URL {
-  if (!ctx.siteUrl) throw new Error("Aucun site configuré pour cette session.");
-  const site = new URL(ctx.siteUrl);
-  const url = new URL(path, site);
-  if (url.origin !== site.origin) throw new Error(`Refusé : ${url.href} est hors du site ${site.origin}.`);
-  return url;
+const LIST_LIMIT = 50;
+
+const PRODUCTS_QUERY = `query ProductsSeo($first: Int!) {
+  products(first: $first, sortKey: TITLE) {
+    nodes { id title handle status description seo { title description } media(first: 20) { nodes { alt } } }
+    pageInfo { hasNextPage }
+  }
+}`;
+
+const COLLECTIONS_QUERY = `query CollectionsSeo($first: Int!) {
+  collections(first: $first, sortKey: TITLE) {
+    nodes { id title handle description seo { title description } }
+    pageInfo { hasNextPage }
+  }
+}`;
+
+// Les alias GraphQL (resource, result) donnent la même forme de réponse aux produits et aux collections.
+const SEO_TARGETS = {
+  product: {
+    label: "Produit",
+    idPrefix: "gid://shopify/Product/",
+    read: `query ProductSeo($id: ID!) { resource: product(id: $id) { title seo { title description } } }`,
+    update: `mutation UpdateProductSeo($input: ProductUpdateInput!) {
+      result: productUpdate(product: $input) { resource: product { seo { title description } } userErrors { field message } }
+    }`,
+  },
+  collection: {
+    label: "Collection",
+    idPrefix: "gid://shopify/Collection/",
+    read: `query CollectionSeo($id: ID!) { resource: collection(id: $id) { title seo { title description } } }`,
+    update: `mutation UpdateCollectionSeo($input: CollectionUpdateInput!) {
+      result: collectionUpdate(collection: $input) { resource: collection { seo { title description } } userErrors { field message } }
+    }`,
+  },
+};
+
+const show = (value: string | null | undefined) => (value ? `« ${value} »` : "(vide)");
+
+function seoUpdateTool(shopify: ShopifyClient, kind: keyof typeof SEO_TARGETS): AgentTool {
+  const target = SEO_TARGETS[kind];
+
+  async function readCurrent(id: string) {
+    const data = await shopify.graphql<{ resource: { title: string; seo: Seo } | null }>(target.read, { id });
+    if (!data.resource) throw new Error(`${target.label} introuvable : ${id}`);
+    return data.resource;
+  }
+
+  return defineTool({
+    name: `update_${kind}_seo`,
+    description:
+      `Modifie le title et/ou la description SEO (affichés dans Google) d'un élément de type ${target.label.toLowerCase()}. ` +
+      "Un champ non fourni reste inchangé. Action critique soumise à validation humaine.",
+    schema: z.object({
+      id: z.string().startsWith(target.idPrefix).describe(`Identifiant Shopify, ex : ${target.idPrefix}123`),
+      seoTitle: z.string().min(1).max(60).optional(),
+      seoDescription: z.string().min(1).max(160).optional(),
+      reason: z.string().describe("Pourquoi ce changement améliore le référencement, en une phrase."),
+    }),
+    requiresApproval: true,
+    summarize: async ({ id, seoTitle, seoDescription, reason }) => {
+      const current = await readCurrent(id);
+      return [
+        `${target.label} « ${current.title} »`,
+        seoTitle !== undefined && `title SEO : ${show(current.seo.title)} → ${show(seoTitle)}`,
+        seoDescription !== undefined && `description SEO : ${show(current.seo.description)} → ${show(seoDescription)}`,
+        `Motif : ${reason}`,
+      ]
+        .filter(Boolean)
+        .join("\n   ");
+    },
+    execute: async ({ id, seoTitle, seoDescription }) => {
+      if (seoTitle === undefined && seoDescription === undefined) {
+        throw new Error("Rien à modifier : fournir seoTitle ou seoDescription.");
+      }
+      const before = await readCurrent(id);
+      // On envoie les deux champs pour qu'un champ non fourni garde sa valeur actuelle.
+      const seo = { title: seoTitle ?? before.seo.title, description: seoDescription ?? before.seo.description };
+
+      const data = await shopify.graphql<{
+        result: { resource: { seo: Seo } | null; userErrors: UserError[] };
+      }>(target.update, { input: { id, seo } });
+
+      const { userErrors, resource } = data.result;
+      if (userErrors.length > 0) {
+        throw new Error(`Shopify a refusé la modification : ${userErrors.map((e) => e.message).join(" ; ")}`);
+      }
+      // L'ancienne valeur reste dans l'historique du thread : de quoi revenir en arrière.
+      return { id, before: before.seo, after: resource?.seo };
+    },
+  });
 }
 
-export const analyzePage = defineTool({
-  name: "analyze_page",
-  description:
-    "Télécharge une page du site et en extrait les éléments SEO : title, meta description, titres h1, " +
-    "balise canonical, langue et nombre d'images sans texte alternatif.",
-  schema: z.object({ path: pathSchema }),
-  execute: async ({ path }, ctx) => {
-    const url = pageUrl(path, ctx);
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000) });
-    if (new URL(response.url).origin !== url.origin) {
-      throw new Error(`Refusé : la page redirige hors du site (${response.url}).`);
-    }
+export function createSeoTools(shopify: ShopifyClient): AgentTool[] {
+  const listProductsSeo = defineTool({
+    name: "list_products_seo",
+    description:
+      "Liste les produits avec leurs champs SEO actuels, leur description et le nombre d'images sans texte alternatif. " +
+      "Un champ SEO vide signifie que Google affiche le nom et la description bruts du produit.",
+    schema: z.object({}),
+    execute: async () => {
+      const data = await shopify.graphql<{
+        products: {
+          nodes: {
+            id: string;
+            title: string;
+            handle: string;
+            status: string;
+            description: string;
+            seo: Seo;
+            media: { nodes: { alt: string | null }[] };
+          }[];
+          pageInfo: { hasNextPage: boolean };
+        };
+      }>(PRODUCTS_QUERY, { first: LIST_LIMIT });
 
-    const $ = cheerio.load(await response.text());
-    const title = $("title").first().text().trim();
-    const metaDescription = $('meta[name="description"]').attr("content")?.trim() ?? "";
+      return {
+        products: data.products.nodes.map(({ media, description, ...product }) => ({
+          ...product,
+          description: description.slice(0, 1000),
+          imagesWithoutAlt: media.nodes.filter((image) => !image.alt).length,
+        })),
+        truncated: data.products.pageInfo.hasNextPage,
+      };
+    },
+  });
 
-    // On renvoie un résumé et pas le HTML brut : moins de tokens, et moins de texte arbitraire dans le contexte.
-    return {
-      url: response.url,
-      status: response.status,
-      title,
-      titleLength: title.length,
-      metaDescription,
-      metaDescriptionLength: metaDescription.length,
-      h1: $("h1").map((_, el) => $(el).text().trim()).get(),
-      canonical: $('link[rel="canonical"]').attr("href") ?? null,
-      lang: $("html").attr("lang") ?? null,
-      imagesWithoutAlt: $("img:not([alt])").length,
-    };
-  },
-});
+  const listCollectionsSeo = defineTool({
+    name: "list_collections_seo",
+    description: "Liste les collections avec leurs champs SEO actuels et leur description.",
+    schema: z.object({}),
+    execute: async () => {
+      const data = await shopify.graphql<{
+        collections: {
+          nodes: { id: string; title: string; handle: string; description: string; seo: Seo }[];
+          pageInfo: { hasNextPage: boolean };
+        };
+      }>(COLLECTIONS_QUERY, { first: LIST_LIMIT });
 
-export const applyMetaChanges = defineTool({
-  name: "apply_meta_changes",
-  description:
-    "Publie un nouveau title et/ou une nouvelle meta description pour une page du site. " +
-    "Action critique soumise à validation humaine.",
-  schema: z.object({
-    path: pathSchema,
-    title: z.string().max(60).optional(),
-    metaDescription: z.string().max(160).optional(),
-    reason: z.string().describe("Pourquoi ce changement améliore le référencement, en une phrase."),
-  }),
-  requiresApproval: true,
-  summarize: ({ path, title, metaDescription, reason }, ctx) =>
-    [
-      `Modifier ${ctx.siteUrl}${path}`,
-      title && `title → « ${title} »`,
-      metaDescription && `description → « ${metaDescription} »`,
-      `Motif : ${reason}`,
-    ]
-      .filter(Boolean)
-      .join(" · "),
-  execute: async ({ path, title, metaDescription }, ctx) => {
-    const url = pageUrl(path, ctx);
-    if (!title && !metaDescription) throw new Error("Rien à modifier : fournir un title ou une meta description.");
-    publishedChanges.push({ url: url.href, title, metaDescription });
-    return { published: true, url: url.href, title, metaDescription };
-  },
-});
+      return {
+        collections: data.collections.nodes.map((c) => ({ ...c, description: c.description.slice(0, 1000) })),
+        truncated: data.collections.pageInfo.hasNextPage,
+      };
+    },
+  });
+
+  return [
+    listProductsSeo,
+    listCollectionsSeo,
+    seoUpdateTool(shopify, "product"),
+    seoUpdateTool(shopify, "collection"),
+  ];
+}

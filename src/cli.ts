@@ -18,11 +18,8 @@ if (!agent) {
 
 const graph = createAgentGraph(agent, { checkpointer: await createCheckpointer() });
 const config = { configurable: { thread_id: threadId } };
-// En production, ce contexte vient de la session (utilisateur connecté, site qu'il gère), jamais du chat.
-const context = {
-  userEmail: process.env.SESSION_USER_EMAIL ?? "evan@example.com",
-  siteUrl: process.env.SESSION_SITE_URL ?? "",
-};
+// En production, ce contexte vient de la session JWT, jamais du chat.
+const context = { userEmail: process.env.SESSION_USER_EMAIL ?? "evan@example.com" };
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 function printBlock(block: Anthropic.Beta.BetaContentBlockParam) {

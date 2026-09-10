@@ -1,6 +1,8 @@
 import type { AgentDefinition } from "../core/graph";
-import { seoAgent } from "./seo";
+import { createSeoAgent } from "./seo";
 import { supportClausifyAgent } from "./support-clausify";
+
+const seoAgent = createSeoAgent();
 
 export const agents: Record<string, AgentDefinition> = {
   [supportClausifyAgent.id]: supportClausifyAgent,
