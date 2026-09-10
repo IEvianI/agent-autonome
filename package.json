@@ -1,0 +1,26 @@
+{
+  "name": "agent-autonome",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Moteur d'agents IA autonomes avec validation humaine (LangGraph + Claude)",
+  "type": "module",
+  "scripts": {
+    "chat": "tsx src/cli.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0",
+    "@langchain/core": "^1.2.10",
+    "@langchain/langgraph": "^1.4.14",
+    "@langchain/langgraph-checkpoint-postgres": "^1.0.5",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
+    "zod": "^4.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.2",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
