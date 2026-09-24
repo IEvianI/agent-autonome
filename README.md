@@ -15,6 +15,14 @@ Le moteur est générique. Chaque agent n'est qu'un prompt et une liste d'outils
 
 ## Démo
 
+Un client a payé son abonnement PRO mais ses documents portent toujours le filigrane. L'agent lit son compte, interroge Stripe, constate l'écart, **demande l'autorisation** de corriger, puis prévient le client par e-mail.
+
+<!-- VIDÉO ICI -->
+
+Tant qu'un humain n'a pas répondu, rien n'est modifié : la correction du plan est une action critique et le graphe est en pause.
+
+### L'agent SEO, sur une vraie boutique Shopify
+
 ```text
 $ npm run chat -- seo
 
