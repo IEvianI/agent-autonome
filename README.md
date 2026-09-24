@@ -17,7 +17,11 @@ Le moteur est générique. Chaque agent n'est qu'un prompt et une liste d'outils
 
 Un client a payé son abonnement PRO mais ses documents portent toujours le filigrane. L'agent lit son compte, interroge Stripe, constate l'écart, **demande l'autorisation** de corriger, puis prévient le client par e-mail.
 
-<!-- VIDÉO ICI -->
+
+
+https://github.com/user-attachments/assets/1fbd7ce9-8829-4665-a7a9-8199b86335d9
+
+
 
 Tant qu'un humain n'a pas répondu, rien n'est modifié : la correction du plan est une action critique et le graphe est en pause.
 
