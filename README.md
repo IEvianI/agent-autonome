@@ -21,7 +21,7 @@ Un client a payé son abonnement PRO mais ses documents portent toujours le fili
 
 
 
-https://github.com/user-attachments/assets/1fbd7ce9-8829-4665-a7a9-8199b86335d9
+https://github.com/user-attachments/assets/6530a495-639d-4c23-aa68-668bab2aa72e
 
 
 
