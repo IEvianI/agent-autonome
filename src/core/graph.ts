@@ -266,9 +266,10 @@ export async function getAuditLog(graph: AgentGraph, threadId: string): Promise<
 /** Une ligne lisible par un humain, pour un export ou un affichage admin. */
 export function formatAuditEntry(entry: AuditEntry): string {
   if (entry.type === "decision") {
-    const verdict = entry.approved ? "approuvée" : "refusée";
+    const verdict = entry.approved ? "approuvé" : "refusé";
     const comment = entry.comment ? ` — « ${entry.comment} »` : "";
-    return `${entry.at} · ${entry.by} a ${verdict} ${entry.toolName}${comment}\n    ${entry.summary}`;
+    // Sans indentation ici : c'est l'affichage qui aligne les lignes suivantes.
+    return `${entry.at} · ${entry.by} a ${verdict} ${entry.toolName}${comment}\n${entry.summary}`;
   }
   const status = { ok: "exécutée", error: "en échec", skipped: "non exécutée" }[entry.status];
   return `${entry.at} · ${entry.toolName} ${status}${entry.detail ? ` — ${entry.detail}` : ""}`;

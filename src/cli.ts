@@ -30,14 +30,33 @@ const context = { userEmail: process.env.SESSION_USER_EMAIL ?? "evan@example.com
 const admin = process.env.ADMIN_EMAIL ?? "admin@example.com";
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
+// Le terminal, lui, coupe au caractère près, donc en plein milieu des mots.
+const WIDTH = Math.min(process.stdout.columns ?? 100, 100);
+
 /** Une ligne, quoi qu'il arrive : le détail complet est dans l'historique du thread. */
-function oneLine(value: unknown, max = 140) {
+function oneLine(value: unknown, max = WIDTH - 4) {
   const text = (typeof value === "string" ? value : JSON.stringify(value) ?? "").replace(/\s+/g, " ").trim();
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+/** Retour à la ligne entre les mots, avec les lignes suivantes alignées sous la première. */
+function wrap(text: string, indent = "") {
+  const width = WIDTH - indent.length;
+  return text
+    .split("\n")
+    .flatMap((paragraph) =>
+      paragraph.split(" ").reduce<string[]>((lines, word) => {
+        const current = lines.at(-1);
+        if (current === undefined || `${current} ${word}`.length > width) lines.push(word);
+        else lines[lines.length - 1] = `${current} ${word}`;
+        return lines;
+      }, []),
+    )
+    .join(`\n${indent}`);
+}
+
 function printBlock(block: Anthropic.Beta.BetaContentBlockParam) {
-  if (block.type === "text") console.log(`\nAgent > ${block.text}`);
+  if (block.type === "text") console.log(`\nAgent > ${wrap(block.text, "        ")}`);
   if (block.type === "tool_use") console.log(`  🔧 ${block.name} ${oneLine(block.input)}`);
   if (block.type === "tool_result") console.log(`  ↳ ${oneLine(block.content)}`);
 }
@@ -47,7 +66,7 @@ async function run(input: Parameters<typeof graph.stream>[0]) {
   for await (const update of stream) {
     for (const nodeUpdate of Object.values(update as Record<string, { messages?: Anthropic.Beta.BetaMessageParam[] }>)) {
       for (const message of nodeUpdate?.messages ?? []) {
-        if (typeof message.content === "string") console.log(`\nAgent > ${message.content}`);
+        if (typeof message.content === "string") console.log(`\nAgent > ${wrap(message.content, "        ")}`);
         else message.content.forEach(printBlock);
       }
     }
@@ -59,7 +78,7 @@ async function resolveApprovals() {
   while (requests.length > 0) {
     const decisions: Record<string, ApprovalDecision> = {};
     for (const request of requests) {
-      console.log(`\n⏸  Validation requise : ${request.summary}`);
+      console.log(`\n⏸  Validation requise : ${wrap(request.summary, "   ")}`);
       const answer = (await rl.question("   Approuver ? [o/N] > ")).trim().toLowerCase();
       if (answer === "o" || answer === "oui") {
         decisions[request.toolUseId] = { approved: true, by: admin };
@@ -84,7 +103,11 @@ while (true) {
   if (text === "exit") break;
   if (text === "audit") {
     const entries = await getAuditLog(graph, threadId);
-    console.log(entries.length ? entries.map(formatAuditEntry).join("\n") : "Aucune action critique sur ce thread.");
+    console.log(
+      entries.length
+        ? wrap(entries.map(formatAuditEntry).join("\n"), "    ")
+        : "Aucune action critique sur ce thread.",
+    );
     continue;
   }
   if (!text) continue;
