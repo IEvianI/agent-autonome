@@ -1,5 +1,7 @@
 # Agent autonome
 
+[![CI](https://github.com/IEvianI/agent-autonome/actions/workflows/ci.yml/badge.svg)](https://github.com/IEvianI/agent-autonome/actions/workflows/ci.yml)
+
 Moteur d'agents IA autonomes en TypeScript, avec **validation humaine avant toute action sensible**.
 
 Un agent lit des données, raisonne, puis propose d'agir. Quand l'action modifie quelque chose de réel (une fiche produit, un abonnement client), le moteur se met en pause et attend qu'un humain approuve ou refuse. L'agent ne peut pas contourner cette étape : c'est le graphe qui l'impose, pas le prompt.
