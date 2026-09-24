@@ -25,7 +25,38 @@ export type ApprovalRequest = {
   summary: string;
 };
 
-export type ApprovalDecision = { approved: boolean; comment?: string };
+export type ApprovalDecision = {
+  approved: boolean;
+  comment?: string;
+  /** Qui décide. Posé par le serveur depuis la session de l'administrateur, jamais saisi par le modèle. */
+  by?: string;
+};
+
+/**
+ * Journal d'audit : qui a décidé quoi, quand, et ce que l'action a donné.
+ * Écrit dans l'état du graphe, donc persisté par le checkpointer avec le reste du thread.
+ */
+export type AuditEntry =
+  | {
+      type: "decision";
+      toolUseId: string;
+      toolName: string;
+      summary: string;
+      approved: boolean;
+      comment?: string;
+      by: string;
+      at: string;
+    }
+  | {
+      type: "execution";
+      toolUseId: string;
+      toolName: string;
+      status: "ok" | "error" | "skipped";
+      detail?: string;
+      at: string;
+    };
+
+const UNKNOWN_ADMIN = "inconnu";
 
 type MessageParam = Anthropic.Beta.BetaMessageParam;
 type ToolUse = Anthropic.Beta.BetaToolUseBlockParam;
@@ -51,6 +82,11 @@ export const AgentState = Annotation.Root({
   decisions: Annotation<Record<string, ApprovalDecision>>({
     reducer: (_, update) => update,
     default: () => ({}),
+  }),
+  // Journal d'audit du thread : on ajoute, on ne réécrit jamais.
+  audit: Annotation<AuditEntry[]>({
+    reducer: (current, update) => current.concat(update),
+    default: () => [],
   }),
 });
 
@@ -139,10 +175,28 @@ export function createAgentGraph(
     // de bord ici (les lectures faites pour les résumés sont simplement refaites),
     // les outils s'exécutent dans le nœud suivant.
     const decisions = interrupt<ApprovalRequest[], Record<string, ApprovalDecision>>(requests);
-    return { decisions };
+
+    // L'horodatage est posé ici, au moment où la décision revient, et non par l'appelant.
+    const at = new Date().toISOString();
+    const audit = requests.map((request): AuditEntry => {
+      const decision = decisions[request.toolUseId];
+      return {
+        type: "decision",
+        toolUseId: request.toolUseId,
+        toolName: request.toolName,
+        summary: request.summary,
+        approved: decision?.approved ?? false,
+        comment: decision?.comment,
+        by: decision?.by ?? UNKNOWN_ADMIN,
+        at,
+      };
+    });
+    return { decisions, audit };
   }
 
-  async function runTool(call: ToolUse, state: State): Promise<{ content: string; is_error?: boolean }> {
+  type ToolOutcome = { content: string; is_error?: boolean; status?: AuditEntry & { type: "execution" } };
+
+  async function runTool(call: ToolUse, state: State): Promise<ToolOutcome> {
     const tool = toolsByName.get(call.name);
     if (!tool) return { content: `Outil inconnu : ${call.name}`, is_error: true };
 
@@ -151,28 +205,43 @@ export function createAgentGraph(
       return { content: `Arguments invalides : ${parsed.error.message}`, is_error: true };
     }
 
+    // Seules les actions critiques sont tracées : le reste, ce sont des lectures.
+    const trace = (status: "ok" | "error" | "skipped", detail?: string): ToolOutcome["status"] =>
+      tool.requiresApproval
+        ? { type: "execution", toolUseId: call.id, toolName: call.name, status, detail, at: new Date().toISOString() }
+        : undefined;
+
     if (tool.requiresApproval) {
       const decision = state.decisions[call.id];
       if (!decision?.approved) {
         const comment = decision?.comment ? ` Commentaire : ${decision.comment}` : "";
-        return { content: `Action refusée par un administrateur humain.${comment} Ne la retente pas.` };
+        // L'identité de l'administrateur reste dans le journal : inutile de l'exposer au modèle,
+        // qui répond à l'utilisateur final.
+        return {
+          content: `Action refusée par un administrateur humain.${comment} Ne la retente pas.`,
+          status: trace("skipped"),
+        };
       }
     }
 
     try {
-      return { content: JSON.stringify(await tool.execute(parsed.data, state.context)) };
+      return { content: JSON.stringify(await tool.execute(parsed.data, state.context)), status: trace("ok") };
     } catch (error) {
-      return { content: error instanceof Error ? error.message : String(error), is_error: true };
+      const message = error instanceof Error ? error.message : String(error);
+      return { content: message, is_error: true, status: trace("error", message) };
     }
   }
 
   async function runTools(state: State) {
     const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
+    const audit: AuditEntry[] = [];
     // Séquentiel : si le modèle enchaîne « corriger » puis « envoyer l'e-mail », l'ordre compte.
     for (const call of pendingToolUses(state)) {
-      results.push({ type: "tool_result", tool_use_id: call.id, ...(await runTool(call, state)) });
+      const { status, ...result } = await runTool(call, state);
+      if (status) audit.push(status);
+      results.push({ type: "tool_result", tool_use_id: call.id, ...result });
     }
-    return { messages: [{ role: "user" as const, content: results }], decisions: {} };
+    return { messages: [{ role: "user" as const, content: results }], decisions: {}, audit };
   }
 
   return new StateGraph(AgentState)
@@ -187,6 +256,23 @@ export function createAgentGraph(
 }
 
 export type AgentGraph = ReturnType<typeof createAgentGraph>;
+
+/** Journal d'audit du thread, dans l'ordre chronologique. */
+export async function getAuditLog(graph: AgentGraph, threadId: string): Promise<AuditEntry[]> {
+  const snapshot = await graph.getState({ configurable: { thread_id: threadId } });
+  return snapshot.values.audit ?? [];
+}
+
+/** Une ligne lisible par un humain, pour un export ou un affichage admin. */
+export function formatAuditEntry(entry: AuditEntry): string {
+  if (entry.type === "decision") {
+    const verdict = entry.approved ? "approuvée" : "refusée";
+    const comment = entry.comment ? ` — « ${entry.comment} »` : "";
+    return `${entry.at} · ${entry.by} a ${verdict} ${entry.toolName}${comment}\n    ${entry.summary}`;
+  }
+  const status = { ok: "exécutée", error: "en échec", skipped: "non exécutée" }[entry.status];
+  return `${entry.at} · ${entry.toolName} ${status}${entry.detail ? ` — ${entry.detail}` : ""}`;
+}
 
 /** Validations en attente sur un thread (vide si le graphe n'est pas en pause). */
 export async function getPendingApprovals(graph: AgentGraph, threadId: string): Promise<ApprovalRequest[]> {

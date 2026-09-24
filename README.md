@@ -64,6 +64,14 @@ Trois nœuds, identiques pour tous les agents ([src/core/graph.ts](src/core/grap
 2. **review** repère les outils marqués `requiresApproval`, construit un résumé lisible de chaque action et arrête le graphe avec `interrupt()`. L'état est sauvegardé par le checkpointer : la validation peut arriver plus tard, depuis une autre session.
 3. **tools** exécute les appels, un par un et dans l'ordre. Une action critique sans accord explicite n'est pas exécutée.
 
+Chaque action critique laisse deux traces dans le **journal d'audit** du thread : la décision (qui, quand, approuvée ou refusée, avec le résumé que l'administrateur avait sous les yeux) puis son résultat (exécutée, en échec ou non exécutée). Le journal vit dans l'état du graphe, donc il est persisté avec le reste du thread et se relit avec `getAuditLog(graph, threadId)`.
+
+```text
+2026-09-24T09:12:31.004Z · chef@clausify.fr a approuvé fix_user_entitlements
+    Passer evan@example.com de FREE à PRO (abonnement Stripe actif depuis le 02/09)
+2026-09-24T09:12:31.115Z · fix_user_entitlements exécutée
+```
+
 ```text
 src/
 ├── core/                      # le moteur, sans rien de spécifique à un domaine
@@ -82,6 +90,7 @@ src/
 - **Le LLM ne choisit pas pour qui il agit.** L'identité de l'utilisateur est posée par le serveur dans `context` et lue par les outils. Elle ne fait jamais partie des arguments que le modèle remplit ([src/core/tool.ts](src/core/tool.ts)).
 - **Aucun effet de bord avant la validation.** À la reprise, LangGraph ré-exécute le nœud `review` depuis le début. Il ne fait donc que des lectures, et les écritures ont lieu dans le nœud suivant.
 - **Les arguments sont validés deux fois.** Le schéma Zod sert à décrire l'outil à Claude et à rejeter un appel mal formé avant qu'il n'arrive à l'admin (par exemple un identifiant de collection passé à l'outil produit).
+- **Chaque décision est nominative et horodatée.** Le journal garde le résumé exact soumis à l'administrateur, pas une reconstruction après coup. L'horodatage est posé par le graphe à la reprise, jamais fourni par l'appelant.
 - **L'avant/après est lu sur la vraie source.** Le résumé de validation SEO interroge Shopify au moment de la demande. L'ancienne valeur reste dans l'historique du thread, ce qui permet de revenir en arrière.
 - **SDK Claude natif plutôt qu'une surcouche.** LangGraph gère l'état et les pauses, le SDK Anthropic gère les appels au modèle. L'historique reste au format natif de l'API.
 
@@ -117,15 +126,18 @@ cp .env.example .env    # renseigner au minimum ANTHROPIC_API_KEY
 | `ANTHROPIC_API_KEY` | Clé API Claude |
 | `DATABASE_URL` | Optionnel. Postgres pour que les pauses survivent à un redémarrage (sinon état en mémoire) |
 | `SESSION_USER_EMAIL` | Utilisateur simulé de la session (agent support) |
+| `ADMIN_EMAIL` | Administrateur dont le nom est inscrit dans le journal d'audit |
 | `SHOPIFY_SHOP`, `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | App du Dev Dashboard Shopify avec les droits `read_products` et `write_products` |
 
 ```bash
 npm run chat -- seo                 # agent SEO Shopify
 npm run chat -- support-clausify    # agent support (données simulées)
 npm run chat -- seo <threadId>      # reprendre une conversation en pause (avec DATABASE_URL)
-npm test                            # 9 tests, sans appel réseau ni clé API
+npm test                            # 12 tests, sans appel réseau ni clé API
 npm run typecheck
 ```
+
+Dans le chat, taper `audit` affiche le journal des actions critiques du thread.
 
 Pour l'agent support, un message comme *« J'ai payé le plan PRO mais mes documents ont toujours le filigrane »* déclenche le scénario complet : diagnostic, demande de correction, e-mail de confirmation.
 
@@ -134,6 +146,9 @@ Pour l'agent support, un message comme *« J'ai payé le plan PRO mais mes docum
 Les tests remplacent Claude et Shopify par des doublures : ils vérifient le comportement du moteur sans appel réseau.
 
 - une action critique met le graphe en pause, puis s'exécute une fois approuvée
+- le journal retient qui a validé, quand, et ce que l'action a donné
+- une action refusée laisse une trace nominative et n'est pas exécutée
+- une décision sans administrateur identifié est tracée comme telle
 - un refus est renvoyé au modèle et rien n'est modifié
 - même approuvée, une correction de plan échoue si Stripe ne confirme pas le paiement
 - le résumé de validation SEO montre l'avant et l'après

@@ -4,7 +4,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { Command, MemorySaver } from "@langchain/langgraph";
 import { supportClausifyAgent } from "../agents/support-clausify";
 import { db, outbox, resetFakeBackend } from "../agents/support-clausify/fake-backend";
-import { createAgentGraph, getPendingApprovals } from "./graph";
+import { createAgentGraph, getAuditLog, getPendingApprovals } from "./graph";
 
 // Faux modèle qui rejoue un scénario écrit à l'avance : on teste la mécanique du graphe
 // (pause, reprise, refus) de façon déterministe, sans clé ni coût d'API.
@@ -62,7 +62,10 @@ test("l'action critique met le graphe en pause, puis s'exécute une fois approuv
   assert.equal(request?.toolName, "fix_user_entitlements");
   assert.equal(user("evan@example.com").plan, "FREE", "rien ne doit bouger pendant la pause");
 
-  await graph.invoke(new Command({ resume: { [request.toolUseId]: { approved: true } } }), config);
+  await graph.invoke(
+    new Command({ resume: { [request.toolUseId]: { approved: true, by: "admin@example.com" } } }),
+    config,
+  );
 
   assert.equal(user("evan@example.com").plan, "PRO");
   assert.equal(user("evan@example.com").watermarkedDocuments, 0);
@@ -87,6 +90,75 @@ test("un refus de l'admin est renvoyé au modèle et rien n'est modifié", async
   assert.equal(user("evan@example.com").plan, "FREE");
   assert.equal(outbox.length, 0);
   assert.match(String(lastToolResult(final.messages).content), /refusée.*Vérifier la facture/);
+});
+
+test("le journal retient qui a validé, quand, et ce que l'action a donné", async () => {
+  const { graph, config, firstMessage } = startThread("audit-ok", "evan@example.com", [
+    diagnosis,
+    fix,
+    [toolUse("t4", "send_email_to_user", { subject: "Votre plan Pro est actif", body: "..." })],
+    [text("C'est réglé.")],
+  ]);
+  await firstMessage;
+
+  const before = new Date().toISOString();
+  const [request] = await getPendingApprovals(graph, "audit-ok");
+  await graph.invoke(
+    new Command({ resume: { [request!.toolUseId]: { approved: true, by: "chef@clausify.fr" } } }),
+    config,
+  );
+
+  const journal = await getAuditLog(graph, "audit-ok");
+  const decision = journal.find((entry) => entry.type === "decision");
+  assert.equal(decision?.by, "chef@clausify.fr");
+  assert.equal(decision?.approved, true);
+  assert.equal(decision?.toolName, "fix_user_entitlements");
+  assert.ok(decision!.at >= before, "la décision doit être horodatée au moment de la reprise");
+  assert.ok(decision!.summary.length > 0, "le journal garde ce que l'admin avait sous les yeux");
+
+  const execution = journal.find((entry) => entry.type === "execution");
+  assert.equal(execution?.status, "ok");
+  // Les lectures et l'envoi d'e-mail ne sont pas des actions critiques : le journal ne retient qu'elles.
+  assert.deepEqual(journal.map((entry) => entry.type), ["decision", "execution"]);
+});
+
+test("une action refusée laisse une trace nominative et n'est pas exécutée", async () => {
+  const { graph, config, firstMessage } = startThread("audit-refus", "evan@example.com", [
+    diagnosis,
+    fix,
+    [text("Un conseiller va examiner votre dossier.")],
+  ]);
+  await firstMessage;
+
+  const [request] = await getPendingApprovals(graph, "audit-refus");
+  await graph.invoke(
+    new Command({
+      resume: { [request!.toolUseId]: { approved: false, comment: "Facture à vérifier", by: "chef@clausify.fr" } },
+    }),
+    config,
+  );
+
+  const journal = await getAuditLog(graph, "audit-refus");
+  assert.deepEqual(
+    journal.map((entry) => (entry.type === "decision" ? [entry.by, entry.approved, entry.comment] : entry.status)),
+    [["chef@clausify.fr", false, "Facture à vérifier"], "skipped"],
+  );
+  assert.equal(user("evan@example.com").plan, "FREE");
+});
+
+test("une décision sans administrateur identifié est tracée comme telle", async () => {
+  const { graph, config, firstMessage } = startThread("audit-anonyme", "evan@example.com", [
+    diagnosis,
+    fix,
+    [text("Un conseiller va examiner votre dossier.")],
+  ]);
+  await firstMessage;
+
+  const [request] = await getPendingApprovals(graph, "audit-anonyme");
+  await graph.invoke(new Command({ resume: { [request!.toolUseId]: { approved: false } } }), config);
+
+  const journal = await getAuditLog(graph, "audit-anonyme");
+  assert.equal(journal.find((entry) => entry.type === "decision")?.by, "inconnu");
 });
 
 test("même approuvée, l'action échoue si Stripe ne confirme pas le paiement", async () => {
