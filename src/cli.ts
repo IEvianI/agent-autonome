@@ -30,10 +30,16 @@ const context = { userEmail: process.env.SESSION_USER_EMAIL ?? "evan@example.com
 const admin = process.env.ADMIN_EMAIL ?? "admin@example.com";
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
+/** Une ligne, quoi qu'il arrive : le détail complet est dans l'historique du thread. */
+function oneLine(value: unknown, max = 140) {
+  const text = (typeof value === "string" ? value : JSON.stringify(value) ?? "").replace(/\s+/g, " ").trim();
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
 function printBlock(block: Anthropic.Beta.BetaContentBlockParam) {
   if (block.type === "text") console.log(`\nAgent > ${block.text}`);
-  if (block.type === "tool_use") console.log(`  🔧 ${block.name} ${JSON.stringify(block.input)}`);
-  if (block.type === "tool_result") console.log(`  ↳ ${String(block.content).slice(0, 200)}`);
+  if (block.type === "tool_use") console.log(`  🔧 ${block.name} ${oneLine(block.input)}`);
+  if (block.type === "tool_result") console.log(`  ↳ ${oneLine(block.content)}`);
 }
 
 async function run(input: Parameters<typeof graph.stream>[0]) {
