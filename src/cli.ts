@@ -58,6 +58,7 @@ function wrap(text: string, indent = "") {
 function printBlock(block: Anthropic.Beta.BetaContentBlockParam) {
   if (block.type === "text") console.log(`\nAgent > ${wrap(block.text, "        ")}`);
   if (block.type === "tool_use") console.log(`  🔧 ${block.name} ${oneLine(block.input)}`);
+  if (block.type === "server_tool_use") console.log(`  🔎 ${block.name} ${oneLine(block.input)}`);
   if (block.type === "tool_result") console.log(`  ↳ ${oneLine(block.content)}`);
 }
 

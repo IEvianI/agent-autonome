@@ -6,12 +6,13 @@ Moteur d'agents IA autonomes en TypeScript, avec **validation humaine avant tout
 
 Un agent lit des données, raisonne, puis propose d'agir. Quand l'action modifie quelque chose de réel (une fiche produit, un abonnement client), le moteur se met en pause et attend qu'un humain approuve ou refuse. L'agent ne peut pas contourner cette étape : c'est le graphe qui l'impose, pas le prompt.
 
-Le moteur est générique. Chaque agent n'est qu'un prompt et une liste d'outils branchés dessus. Deux agents sont fournis :
+Le moteur est générique. Chaque agent n'est qu'un prompt et une liste d'outils branchés dessus. Trois agents sont fournis :
 
 | Agent | Ce qu'il fait | Données |
 |---|---|---|
 | **SEO Shopify** (`seo`) | Audite les titres et descriptions SEO d'une boutique, propose des corrections, les applique après accord | **API Admin GraphQL Shopify réelle** |
 | **Support Clausify** (`support-clausify`) | Diagnostique un client qui a payé mais dont le compte est resté en FREE, corrige son plan après accord, lui envoie un e-mail | Base et Stripe simulés, scénario tiré d'un vrai bug de webhook |
+| **Candidatures spontanées** (`candidatures`) | Repère les entreprises qui recrutent, trouve leur adresse de contact sur leur site, rédige une lettre propre à chacune et l'envoie après relecture | **API La Bonne Boîte (France Travail)**, recherche web de Claude, SMTP |
 
 **Stack :** TypeScript · [LangGraph](https://langchain-ai.github.io/langgraphjs/) (orchestration, pauses, persistance) · SDK `@anthropic-ai/sdk` (Claude) · Zod · Postgres (Neon) · `node:test`
 
@@ -46,6 +47,31 @@ Vous > Fais un audit SEO de la boutique et corrige ce qui manque.
 
 L'administrateur voit l'**avant et l'après** lus en direct sur la boutique, et le motif donné par l'agent. S'il refuse, son commentaire est renvoyé à l'agent, qui ne retente pas l'action.
 
+### L'agent candidatures, sur La Bonne Boîte
+
+```text
+$ npm run chat -- candidatures
+
+Vous > Trouve des entreprises qui recrutent des développeurs web autour de Nantes et postule.
+  🔧 get_candidate_profile {}
+  🔧 search_companies {"rome":["M1805"],"location":"Nantes"}
+  🔎 web_search {"query":"… Nantes site officiel recrutement"}
+  🔎 web_fetch {"url":"https://…/contact"}
+  🔧 send_application {"siret":"…","to":"…","subject":"…","body":"…"}
+
+⏸  Validation requise : Candidature à … (SIRET …)
+   De : moi@gmail.com  →  À : recrutement@…
+   Adresse trouvée sur : https://…/contact
+   Objet : …
+   (lettre complète)
+   (1342/1500 caractères)
+   Approuver ? [o/N] >
+```
+
+L'API La Bonne Boîte ne donne que le nom, le SIRET, l'activité, la ville et le potentiel d'embauche. L'agent cherche donc lui-même une adresse publiée par l'entreprise et montre la page où il l'a trouvée. Il n'a pas le droit de deviner une adresse. Le code bloque tout second envoi à la même entreprise (même SIREN ou même adresse) et applique un plafond quotidien, même si le candidat approuve.
+
+*Données : France Travail, API La Bonne Boîte.*
+
 ## Architecture
 
 ```mermaid
@@ -79,6 +105,7 @@ src/
 │   ├── tool.ts                # defineTool() : schéma Zod, validation requise ou non, résumé
 │   └── checkpointer.ts        # Postgres si DATABASE_URL, sinon mémoire
 ├── agents/
+│   ├── candidatures/          # prompt + client La Bonne Boîte + envoi SMTP + historique
 │   ├── seo/                   # prompt + client Shopify + outils
 │   └── support-clausify/      # prompt + outils + backend simulé
 └── cli.ts                     # interface en ligne de commande
@@ -128,12 +155,17 @@ cp .env.example .env    # renseigner au minimum ANTHROPIC_API_KEY
 | `SESSION_USER_EMAIL` | Utilisateur simulé de la session (agent support) |
 | `ADMIN_EMAIL` | Administrateur dont le nom est inscrit dans le journal d'audit |
 | `SHOPIFY_SHOP`, `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | App du Dev Dashboard Shopify avec les droits `read_products` et `write_products` |
+| `FRANCE_TRAVAIL_CLIENT_ID`, `FRANCE_TRAVAIL_CLIENT_SECRET` | Application [francetravail.io](https://francetravail.io) abonnée à l'API La Bonne Boîte |
+| `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM_NAME` | Boîte d'envoi des candidatures (Gmail : mot de passe d'application) |
+| `CANDIDAT_PROFILE_PATH`, `CV_PATH` | Profil du candidat (modèle : [profil.example.md](src/agents/candidatures/profil.example.md)) et CV joint |
+| `CANDIDATURES_MAX_PER_DAY` | Plafond d'envois par jour (10 par défaut) |
 
 ```bash
 npm run chat -- seo                 # agent SEO Shopify
 npm run chat -- support-clausify    # agent support (données simulées)
+npm run chat -- candidatures        # candidatures spontanées (La Bonne Boîte)
 npm run chat -- seo <threadId>      # reprendre une conversation en pause (avec DATABASE_URL)
-npm test                            # 12 tests, sans appel réseau ni clé API
+npm test                            # 20 tests, sans appel réseau ni clé API
 npm run typecheck
 ```
 
@@ -155,6 +187,10 @@ Les tests remplacent Claude et Shopify par des doublures : ils vérifient le com
 - un champ SEO non fourni garde sa valeur actuelle
 - un identifiant d'un autre type de ressource est refusé
 - le token Shopify est réutilisé tant qu'il est valide, et les erreurs GraphQL sont remontées
+- un tour mis en pause par l'API pendant une recherche web est relancé et forme un seul message
+- la validation d'une candidature montre le destinataire, la page où l'adresse a été trouvée et la lettre entière
+- une entreprise déjà contactée (même SIREN ou même adresse) ne reçoit rien, et le plafond quotidien bloque l'envoi
+- le client La Bonne Boîte demande les bons droits et réutilise son token
 
 ## Suite prévue
 

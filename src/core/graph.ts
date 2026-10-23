@@ -15,6 +15,8 @@ export type AgentDefinition = {
   name: string;
   systemPrompt: string;
   tools: AgentTool[];
+  /** Outils exécutés chez Anthropic (recherche web…). Ils ne font que lire : pas de validation. */
+  serverTools?: Anthropic.Beta.BetaToolUnion[];
   model?: string;
 };
 
@@ -65,6 +67,10 @@ type CallModel = (
 ) => Promise<Anthropic.Beta.BetaMessage>;
 
 const DEFAULT_MODEL = "claude-opus-5";
+// Modèles qui acceptent le repli côté serveur quand leurs filtres de sécurité déclinent.
+const FALLBACK_MODELS = new Set(["claude-opus-5", "claude-opus-5-5"]);
+// Une longue série de recherches web peut être mise en pause par l'API : on relance, mais pas indéfiniment.
+const MAX_CONTINUATIONS = 5;
 
 export const AgentState = Annotation.Root({
   // Historique au format natif de l'API Claude. Les nœuds ajoutent, rien n'est réécrit.
@@ -108,7 +114,10 @@ export function createAgentGraph(
   options: { checkpointer: BaseCheckpointSaver; callModel?: CallModel },
 ) {
   const toolsByName = new Map(agent.tools.map((tool) => [tool.name, tool]));
-  const anthropicTools = agent.tools.map(toAnthropicTool);
+  const anthropicTools: Anthropic.Beta.BetaToolUnion[] = [
+    ...agent.tools.map(toAnthropicTool),
+    ...(agent.serverTools ?? []),
+  ];
   const model = agent.model ?? DEFAULT_MODEL;
   const callModel = options.callModel ?? defaultCallModel();
 
@@ -121,13 +130,20 @@ export function createAgentGraph(
       messages: state.messages,
       cache_control: { type: "ephemeral" },
     };
-    if (model === "claude-opus-5") {
-      // Si les filtres de sécurité d'Opus 5 déclinent la requête, l'API la rejoue sur un autre modèle.
+    if (FALLBACK_MODELS.has(model)) {
+      // Si les filtres de sécurité déclinent la requête, l'API la rejoue sur un autre modèle.
       params.betas = ["server-side-fallback-2026-07-01"];
       params.fallbacks = "default";
     }
 
-    const response = await callModel(params);
+    let response = await callModel(params);
+    // pause_turn : on renvoie à l'API ce qu'elle a déjà produit et elle reprend où elle s'était arrêtée.
+    // Le tout forme un seul message assistant dans l'historique.
+    let content = response.content;
+    for (let i = 0; response.stop_reason === "pause_turn" && i < MAX_CONTINUATIONS; i++) {
+      response = await callModel({ ...params, messages: [...state.messages, { role: "assistant", content }] });
+      content = [...content, ...response.content];
+    }
 
     if (response.stop_reason === "refusal") {
       return {
@@ -139,7 +155,7 @@ export function createAgentGraph(
         ],
       };
     }
-    return { messages: [{ role: "assistant" as const, content: response.content }] };
+    return { messages: [{ role: "assistant" as const, content }] };
   }
 
   async function describeAction(tool: AgentTool, input: unknown, ctx: ToolContext) {

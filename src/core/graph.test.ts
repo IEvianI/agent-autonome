@@ -177,3 +177,30 @@ test("même approuvée, l'action échoue si Stripe ne confirme pas le paiement",
   assert.equal(result.is_error, true);
   assert.match(String(result.content), /aucun abonnement PRO actif/);
 });
+
+test("un tour mis en pause par l'API (pause_turn) est relancé et forme un seul message", async () => {
+  const calls: Anthropic.Beta.MessageCreateParamsNonStreaming[] = [];
+  const responses = [
+    { content: [text("Je cherche…")], stop_reason: "pause_turn" },
+    { content: [text("Voici le résultat.")], stop_reason: "end_turn" },
+  ];
+  const graph = createAgentGraph(supportClausifyAgent, {
+    checkpointer: new MemorySaver(),
+    callModel: async (params) => {
+      calls.push(params);
+      return responses[calls.length - 1] as Anthropic.Beta.BetaMessage;
+    },
+  });
+
+  const state = await graph.invoke(
+    { messages: [{ role: "user", content: "Bonjour" }] },
+    { configurable: { thread_id: "pause" } },
+  );
+
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].messages.at(-1), { role: "assistant", content: [text("Je cherche…")] });
+  assert.deepEqual(state.messages.at(-1), {
+    role: "assistant",
+    content: [text("Je cherche…"), text("Voici le résultat.")],
+  });
+});
